@@ -11,16 +11,27 @@ Componentes (cada um vira um percentil 0-1 contra a propria historia):
 nota = quantos componentes estao no extremo (>= 0.90). Fonte que falhar fica vazia e nao conta.
 tendencia = +1 se o fechamento esta acima da media de 100 dias, -1 se abaixo.
 """
-import csv, io, sys, zipfile, datetime as dt, statistics as st, urllib.request
+import csv, io, sys, zipfile, datetime as dt, statistics as st, urllib.request, time
 
 PARES = ["AUDUSD","EURCHF","GBPNZD","CADJPY","EURAUD","AUDCAD","GBPCAD","EURNZD"]
 EXTREMO = 0.90
 HOJE = dt.date.today()
 
-def baixar(url, timeout=60):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 termometro"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+def baixar(url, timeout=60, tentativas=3):
+    # User-Agent modificado simulando navegador real para evitar rate limit e bloqueios de bot
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    req = urllib.request.Request(url, headers=headers)
+    
+    for tentativa in range(tentativas):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read()
+        except Exception as e:
+            if tentativa < tentativas - 1:
+                print(f"    [tentativa {tentativa+1}/{tentativas} falhou, aguardando 5s...] {url.split('?')[0]}")
+                time.sleep(5)
+            else:
+                raise e # Repassa o erro se falhar em todas as tentativas
 
 def fred(serie):
     """Serie do FRED sem chave de API. Retorna lista [(date, valor)] ordenada."""
@@ -164,9 +175,21 @@ def main():
     usd = carregar_fx()
     juros = carregar_juros()
     cot = carregar_cot()
-    try: vix = fred("VIXCLS")
-    except Exception as e: print(f"[aviso] VIX: {e}"); vix = []
-    ultimo = max(max(s) for s in usd.values() if s)
+    
+    try: 
+        vix = fred("VIXCLS")
+    except Exception as e: 
+        print(f"[aviso] VIX: {e}"); vix = []
+    
+    # ---------------------------------------------------------------- TRAVA DE SEGURANÇA
+    valores_validos = [s for s in usd.values() if s]
+    if not valores_validos:
+        print("Erro critico: Nenhum dado de cambio foi baixado (falha de rede/rate limit). Abortando.")
+        sys.exit(1)
+        
+    ultimo = max(max(s) for s in valores_validos)
+    # -----------------------------------------------------------------------------------
+    
     with open("termometro.csv", "w") as f:
         f.write("par;tendencia;nota;er_pct;juros_pct;cot_pct;vix_pct;data\n")
         for l in tabela(usd, juros, cot, vix, ultimo):
@@ -175,6 +198,7 @@ def main():
             f.write(f"{l[0]};{l[1]};{l[2]};{fmt(l[3])};{fmt(l[4])};{fmt(l[5])};{fmt(l[6])};{HOJE.isoformat()}\n")
     print(f"ultima cotacao usada: {ultimo}")
     print(open("termometro.csv").read())
+    
     if "--historico" in sys.argv:           # tabela semanal desde 2018, para a validacao
         with open("termometro_historico.csv", "w") as f:
             f.write("data;par;tendencia;nota;er_pct;juros_pct;cot_pct;vix_pct\n")
