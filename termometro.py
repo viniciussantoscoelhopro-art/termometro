@@ -11,37 +11,51 @@ Componentes (cada um vira um percentil 0-1 contra a propria historia):
 nota = quantos componentes estao no extremo (>= 0.90). Fonte que falhar fica vazia e nao conta.
 tendencia = +1 se o fechamento esta acima da media de 100 dias, -1 se abaixo.
 """
-import csv, io, sys, zipfile, datetime as dt, statistics as st, urllib.request, time
+import csv, io, os, sys, json, zipfile, datetime as dt, statistics as st, urllib.request
 
 PARES = ["AUDUSD","EURCHF","GBPNZD","CADJPY","EURAUD","AUDCAD","GBPCAD","EURNZD"]
 EXTREMO = 0.90
 HOJE = dt.date.today()
 
-def baixar(url, timeout=60, tentativas=3):
-    # User-Agent modificado simulando navegador real para evitar rate limit e bloqueios de bot
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-    req = urllib.request.Request(url, headers=headers)
-    
-    for tentativa in range(tentativas):
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.read()
-        except Exception as e:
-            if tentativa < tentativas - 1:
-                print(f"    [tentativa {tentativa+1}/{tentativas} falhou, aguardando 5s...] {url.split('?')[0]}")
-                time.sleep(5)
-            else:
-                raise e # Repassa o erro se falhar em todas as tentativas
+FRED_KEY = os.environ.get("FRED_API_KEY", "").strip()
+
+def baixar(url, timeout=30):
+    req = urllib.request.Request(url, headers={"User-Agent": "termometro-regime/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
 
 def fred(serie):
-    """Serie do FRED sem chave de API. Retorna lista [(date, valor)] ordenada."""
-    txt = baixar(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={serie}").decode()
+    """Serie do FRED pela API oficial (exige chave gratuita em FRED_API_KEY).
+    O link de download do site (fredgraph.csv) bloqueia servidores de nuvem como o GitHub Actions."""
+    if not FRED_KEY:
+        raise RuntimeError("FRED_API_KEY nao configurada")
+    url = (f"https://api.stlouisfed.org/fred/series/observations?series_id={serie}"
+           f"&api_key={FRED_KEY}&file_type=json&observation_start=1990-01-01")
+    dados = json.loads(baixar(url))
     out = []
-    for i, linha in enumerate(csv.reader(io.StringIO(txt))):
-        if i == 0 or len(linha) < 2: continue
-        try: out.append((dt.date.fromisoformat(linha[0]), float(linha[1])))
+    for o in dados.get("observations", []):
+        try: out.append((dt.date.fromisoformat(o["date"]), float(o["value"])))
         except ValueError: pass          # FRED usa "." para dia sem dado
     return out
+
+# reserva para o cambio: espelho publico dos mesmos dados do Fed (H.10), hospedado no proprio GitHub
+ESPELHO_FX = "https://raw.githubusercontent.com/datasets/exchange-rates/main/data/daily.csv"
+PAIS_ESPELHO = {"JPY": "Japan", "CAD": "Canada", "CHF": "Switzerland", "AUD": "Australia",
+                "EUR": "Euro", "NZD": "New Zealand", "GBP": "United Kingdom"}
+
+def fx_espelho():
+    """Todas as moedas em 'unidades por dolar' -> convertemos para 'dolares por unidade'."""
+    txt = baixar(ESPELHO_FX, 90).decode()
+    por_pais = {p: m for m, p in PAIS_ESPELHO.items()}
+    usd = {m: {} for m in PAIS_ESPELHO}
+    for r in csv.DictReader(io.StringIO(txt)):
+        m = por_pais.get(r["Country"])
+        if not m: continue
+        try:
+            v = float(r["Exchange rate"]); d = dt.date.fromisoformat(r["Date"])
+            if v > 0 and d.year >= 1990: usd[m][d] = 1 / v
+        except ValueError: pass
+    return usd
 
 def percentil(atual, historico):
     h = [x for x in historico if x is not None]
@@ -60,7 +74,15 @@ def carregar_fx():
         try:
             usd[moeda] = {d: (1/v if inverte else v) for d, v in fred(serie) if v > 0}
         except Exception as e:
-            print(f"[aviso] cambio {moeda} indisponivel: {e}")
+            print(f"[aviso] cambio {moeda} pelo FRED falhou: {e}")
+    faltando = [m for m in FX if not usd.get(m)]
+    if faltando:
+        try:
+            esp = fx_espelho()
+            for m in faltando:
+                if esp.get(m): usd[m] = esp[m]; print(f"[info] cambio {m}: usando espelho do GitHub")
+        except Exception as e:
+            print(f"[aviso] espelho de cambio tambem falhou: {e}")
     return usd
 
 def serie_par(usd, par):
@@ -175,21 +197,14 @@ def main():
     usd = carregar_fx()
     juros = carregar_juros()
     cot = carregar_cot()
-    
-    try: 
-        vix = fred("VIXCLS")
-    except Exception as e: 
-        print(f"[aviso] VIX: {e}"); vix = []
-    
-    # ---------------------------------------------------------------- TRAVA DE SEGURANÇA
-    valores_validos = [s for s in usd.values() if s]
-    if not valores_validos:
-        print("Erro critico: Nenhum dado de cambio foi baixado (falha de rede/rate limit). Abortando.")
+    try: vix = fred("VIXCLS")
+    except Exception as e: print(f"[aviso] VIX: {e}"); vix = []
+    validos = [s for s in usd.values() if s]
+    if not validos:
+        print("[erro] nenhum dado de cambio disponivel (FRED e espelho falharam). Tabela nao atualizada.")
         sys.exit(1)
-        
-    ultimo = max(max(s) for s in valores_validos)
-    # -----------------------------------------------------------------------------------
-    
+    ultimo = max(max(s) for s in validos)
+    print(f"[info] fontes: cambio {len(validos)}/7 | juros {len(juros)}/8 | COT {sum(1 for v in cot.values() if v)}/7 | VIX {'ok' if vix else 'falhou'}")
     with open("termometro.csv", "w") as f:
         f.write("par;tendencia;nota;er_pct;juros_pct;cot_pct;vix_pct;data\n")
         for l in tabela(usd, juros, cot, vix, ultimo):
@@ -198,7 +213,6 @@ def main():
             f.write(f"{l[0]};{l[1]};{l[2]};{fmt(l[3])};{fmt(l[4])};{fmt(l[5])};{fmt(l[6])};{HOJE.isoformat()}\n")
     print(f"ultima cotacao usada: {ultimo}")
     print(open("termometro.csv").read())
-    
     if "--historico" in sys.argv:           # tabela semanal desde 2018, para a validacao
         with open("termometro_historico.csv", "w") as f:
             f.write("data;par;tendencia;nota;er_pct;juros_pct;cot_pct;vix_pct\n")
