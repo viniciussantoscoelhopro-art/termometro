@@ -1,0 +1,29 @@
+name: termometro
+on:
+  schedule:
+    - cron: "30 22 * * 1-5"     # 19h30 de Brasilia, dias uteis
+  workflow_dispatch:
+    inputs:
+      historico:
+        description: "Gerar tambem o historico semanal (validacao)"
+        type: boolean
+        default: false
+permissions:
+  contents: write
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Calcular termometro
+        run: python termometro.py ${{ inputs.historico && '--historico' || '' }}
+      - name: Publicar
+        run: |
+          git config user.name "termometro-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add termometro.csv termometro_historico.csv 2>/dev/null || git add termometro.csv
+          git commit -m "termometro $(date -u +%F)" || echo "sem mudancas"
+          git push
