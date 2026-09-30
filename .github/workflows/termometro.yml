@@ -19,6 +19,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Calcular termometro
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: python termometro.py ${{ inputs.historico && '--historico' || '' }}
       - name: Publicar
         run: |
