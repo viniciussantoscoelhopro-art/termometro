@@ -1,13 +1,14 @@
 """
 Termometro de regime - Exhaustion EA
 Calcula, uma vez por dia, se cada par esta num regime de tendencia forte.
-Saida: termometro.csv  (par;tendencia;nota;er_pct;juros_pct;cot_pct;vix_pct;data)
+Saida: termometro.csv  (par;tendencia;nota;er_pct;juros_pct;cot_pct;vix_pct;data;vix_nivel)
 
 Componentes (cada um vira um percentil 0-1 contra a propria historia):
   er_pct    persistencia de tendencia do par (efficiency ratio 60 dias)
   juros_pct velocidade da divergencia de juros entre as duas economias (6 meses)
   cot_pct   velocidade da mudanca de posicionamento especulativo (CFTC, 13 semanas)
-  vix_pct   estresse global (VIX, media de 20 dias)
+  vix_pct   estresse global (VIX, media de 20 dias) -- e o unico que o EA usa para bloquear
+  vix_nivel o mesmo VIX em pontos (media de 20 dias), so para leitura humana
 nota = quantos componentes estao no extremo (>= 0.90). Fonte que falhar fica vazia e nao conta.
 tendencia = +1 se o fechamento esta acima da media de 100 dias, -1 se abaixo.
 """
@@ -167,19 +168,20 @@ def cot_componente(cot, par, ate):
 
 # ---------------------------------------------------------------- VIX (FRED)
 def vix_componente(vix, ate):
+    """Retorna (percentil da media de 20 dias contra os ultimos 10 anos, media de 20 dias em pontos)."""
     v = [x for d, x in vix if d <= ate]
-    if len(v) < 300: return None
+    if len(v) < 300: return None, None
     med20 = [st.mean(v[i-20:i]) for i in range(20, len(v)+1)]
-    return percentil(med20[-1], med20[-2520:])
+    return percentil(med20[-1], med20[-2520:]), med20[-1]
 
 # ---------------------------------------------------------------- TABELA
 def tabela(usd, juros, cot, vix, ate):
     linhas = []
-    pv = vix_componente(vix, ate) if vix else None
+    pv, nv = vix_componente(vix, ate) if vix else (None, None)
     for par in PARES:
         s = [(d, p) for d, p in serie_par(usd, par) if d <= ate]
         if len(s) < 300:
-            linhas.append([par, 0, 0, None, None, None, pv]); continue
+            linhas.append([par, 0, 0, None, None, None, pv, nv]); continue
         px = [p for _, p in s]
         tend = 1 if px[-1] > st.mean(px[-100:]) else -1
         ers = [efficiency_ratio(px[:i]) for i in range(max(61, len(px)-2520), len(px)+1, 5)]
@@ -188,10 +190,11 @@ def tabela(usd, juros, cot, vix, ate):
         pc = cot_componente(cot, par, ate)
         comps = [per, pj, pc, pv]
         nota = sum(1 for c in comps if c is not None and c >= EXTREMO)
-        linhas.append([par, tend, nota, per, pj, pc, pv])
+        linhas.append([par, tend, nota, per, pj, pc, pv, nv])
     return linhas
 
 def fmt(x): return "" if x is None else f"{x:.2f}"
+def fmt1(x): return "" if x is None else f"{x:.1f}"
 
 def main():
     usd = carregar_fx()
@@ -206,20 +209,20 @@ def main():
     ultimo = max(max(s) for s in validos)
     print(f"[info] fontes: cambio {len(validos)}/7 | juros {len(juros)}/8 | COT {sum(1 for v in cot.values() if v)}/7 | VIX {'ok' if vix else 'falhou'}")
     with open("termometro.csv", "w") as f:
-        f.write("par;tendencia;nota;er_pct;juros_pct;cot_pct;vix_pct;data\n")
+        f.write("par;tendencia;nota;er_pct;juros_pct;cot_pct;vix_pct;data;vix_nivel\n")
         for l in tabela(usd, juros, cot, vix, ultimo):
             # data = dia do CALCULO (o EA usa para saber se a tabela esta atualizada).
             # O cambio do Fed sai semanalmente, entao a ultima cotacao pode ter ate ~10 dias.
-            f.write(f"{l[0]};{l[1]};{l[2]};{fmt(l[3])};{fmt(l[4])};{fmt(l[5])};{fmt(l[6])};{HOJE.isoformat()}\n")
+            f.write(f"{l[0]};{l[1]};{l[2]};{fmt(l[3])};{fmt(l[4])};{fmt(l[5])};{fmt(l[6])};{HOJE.isoformat()};{fmt1(l[7])}\n")
     print(f"ultima cotacao usada: {ultimo}")
     print(open("termometro.csv").read())
     if "--historico" in sys.argv:           # tabela semanal desde 2018, para a validacao
         with open("termometro_historico.csv", "w") as f:
-            f.write("data;par;tendencia;nota;er_pct;juros_pct;cot_pct;vix_pct\n")
+            f.write("data;par;tendencia;nota;er_pct;juros_pct;cot_pct;vix_pct;vix_nivel\n")
             d = dt.date(2018, 1, 5)
             while d <= ultimo:
                 for l in tabela(usd, juros, cot, vix, d):
-                    f.write(f"{d.isoformat()};{l[0]};{l[1]};{l[2]};{fmt(l[3])};{fmt(l[4])};{fmt(l[5])};{fmt(l[6])}\n")
+                    f.write(f"{d.isoformat()};{l[0]};{l[1]};{l[2]};{fmt(l[3])};{fmt(l[4])};{fmt(l[5])};{fmt(l[6])};{fmt1(l[7])}\n")
                 d += dt.timedelta(days=7)
         print("historico gravado")
 
